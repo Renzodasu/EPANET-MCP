@@ -11,6 +11,7 @@ involved. Every run happens in a private temporary directory.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -29,6 +30,12 @@ _FALLBACKS = [
 ]
 
 _VERSION_CACHE = {}
+
+#: Results are cached by .inp content, so asking a second question about the
+#: same network (results, envelope, series) costs no extra solver invocation.
+_CACHE = {}
+_CACHE_ORDER = []
+_CACHE_MAX = 8
 
 
 class EngineError(RuntimeError):
@@ -65,6 +72,7 @@ def engine_info():
         "directory": os.path.dirname(path),
         "version": version(),
         "dll_present": os.path.isfile(os.path.join(os.path.dirname(path), "epanet2.dll")),
+        "cache_entries": len(_CACHE),
     }
 
 
@@ -101,7 +109,16 @@ def run(inp_text, timeout=120, keep_report=False):
 
     Returns a dict with the raw report text, the parsed report, the solver's
     console output and the temporary paths used.
+
+    Results are cached by .inp content, so asking a second question about the
+    same network (results, envelope, series) costs no extra solver run.
     """
+    key = None
+    if not keep_report:
+        key = hashlib.sha256(inp_text.encode("utf-8")).hexdigest()
+        cached = _CACHE.get(key)
+        if cached is not None:
+            return cached
     path = engine_path()
     workdir = tempfile.mkdtemp(prefix="epanet-mcp-")
     inp_path = os.path.join(workdir, "network.inp")
@@ -125,7 +142,7 @@ def run(inp_text, timeout=120, keep_report=False):
             with open(rpt_path, "r", encoding="utf-8", errors="replace") as handle:
                 report_text = handle.read()
         parsed = R.parse_rpt(report_text)
-        return {
+        result = {
             "returncode": completed.returncode,
             "console": console,
             "report_text": report_text,
@@ -134,6 +151,12 @@ def run(inp_text, timeout=120, keep_report=False):
             "inp_path": inp_path if keep_report else None,
             "rpt_path": rpt_path if keep_report else None,
         }
+        if key is not None:
+            _CACHE[key] = result
+            _CACHE_ORDER.append(key)
+            while len(_CACHE_ORDER) > _CACHE_MAX:
+                _CACHE.pop(_CACHE_ORDER.pop(0), None)
+        return result
     finally:
         if not keep_report:
             shutil.rmtree(workdir, ignore_errors=True)

@@ -152,7 +152,7 @@ def main():
                 {"id": "P2", "node1": "J1", "node2": "J2", "length": 800, "diameter": 8, "roughness": 100},
             ],
             "report": {"status": "Yes", "summary": "Yes", "nodes": "All", "links": "All"},
-        }})
+        }, "include_results": True})
         check("run ok", run.get("ok") is True, run.get("errors"))
         nodes = run["last_period"]["nodes"]
         check("J1 pressure 43.28 psi", abs(nodes["J1"]["pressure"] - 43.28) < 0.01, nodes["J1"])
@@ -160,6 +160,15 @@ def main():
         check("R1 demand -150 gpm", abs(nodes["R1"]["demand"] + 150.0) < 0.01, nodes["R1"])
         check("P1 flow 150 gpm", abs(run["last_period"]["links"]["P1"]["flow"] - 150.0) < 0.01)
         check("node units are gpm/ft/psi", run["node_units"] == ["gpm", "ft", "psi"], run["node_units"])
+
+        print("headline")
+        headline = run["headline"]
+        check("headline reports the lowest pressure", abs(headline["pressure"]["min"] - 0.0) < 0.01, headline["pressure"])
+        check("headline names the lowest-pressure node", headline["pressure"]["min_node"] == "R1", headline["pressure"])
+        check("headline names the highest-pressure node", headline["pressure"]["max_node"] == "J2", headline["pressure"])
+        check("headline names the fastest link", headline["velocity"]["max_link"] == "P1", headline["velocity"])
+        check("headline names the slowest link", headline["velocity"]["min_link"] == "P2", headline["velocity"])
+        check("run omits the full tables by default", "last_period" not in client.tool("run", {"inp_text": client.tool("build", {"spec": EPS_SPEC, "include_inp": True})["inp_text"]}))
 
         print("extended period")
         eps = client.tool("build_and_run", {"spec": EPS_SPEC})
@@ -183,6 +192,13 @@ def main():
         print("checks")
         report = client.tool("check", {"inp_text": built})
         check("check passes on a good network", report.get("ok") is True, [c for c in report["checks"] if not c["ok"]])
+        mass = [c for c in report["checks"] if c["check"] == "mass_balance"][0]
+        check(
+            "mass balance tolerance covers report rounding",
+            mass["detail"]["tolerance"] >= 0.005 * mass["detail"]["nodes_counted"],
+            mass["detail"],
+        )
+        check("check omits the full tables", "last_period" not in report)
 
         print("failure handling")
         broken = client.tool("check", {"inp_text": BROKEN_INP})
@@ -198,6 +214,44 @@ def main():
         inspected = client.tool("inspect", {"inp_text": built})
         check("inspect counts 2 junctions", inspected["summary"]["counts"]["junctions"] == 2, inspected["summary"]["counts"])
         check("inspect reports GPM", inspected["summary"]["units"]["flow_units"] == "GPM", inspected["summary"]["units"])
+
+        print("results modes")
+        summary = client.tool("results", {"inp_text": built, "kind": "nodes", "period": "all", "fields": ["pressure"]})
+        check("period all defaults to summary", summary.get("mode") == "summary", summary.get("mode"))
+        check("summary has min/max/mean", set(summary["summary"]["J1"]["pressure"]) == {"min", "max", "mean"}, summary["summary"]["J1"])
+        check(
+            "summary min <= mean <= max",
+            all(
+                stats["min"] <= stats["mean"] <= stats["max"]
+                for entry in summary["summary"].values()
+                for stats in entry.values()
+            ),
+        )
+        full = client.tool("results", {"inp_text": built, "kind": "nodes", "period": "all", "mode": "full", "fields": ["pressure"], "ids": ["J1"]})
+        check("mode full returns every period", len(full["periods"]) == 25, len(full["periods"]))
+        check("mode full is labelled", full.get("mode") == "full", full.get("mode"))
+
+        print("inspect objects")
+        check("inspect omits objects by default", "nodes" not in inspected["summary"] and "links" not in inspected["summary"], list(inspected["summary"]))
+        with_objects = client.tool("inspect", {"inp_text": built, "include_objects": True})
+        check("include_objects returns them", "nodes" in with_objects["summary"] and "links" in with_objects["summary"], list(with_objects["summary"]))
+
+        print("cache")
+        fresh = client.tool("build", {"spec": {
+            "options": {"units": "GPM", "headloss": "H-W"},
+            "junctions": [{"id": "C1", "elevation": 0, "demand": 10}],
+            "reservoirs": [{"id": "CR", "head": 100}],
+            "pipes": [{"id": "CP", "node1": "CR", "node2": "C1", "length": 100, "diameter": 6, "roughness": 100}],
+            "report": {"status": "Yes", "summary": "Yes", "nodes": "All", "links": "All"},
+        }, "include_inp": True})["inp_text"]
+        before = client.tool("engine_info").get("cache_entries", 0)
+        first = client.tool("run", {"inp_text": fresh})
+        after_first = client.tool("engine_info").get("cache_entries", 0)
+        second = client.tool("run", {"inp_text": fresh})
+        after_second = client.tool("engine_info").get("cache_entries", 0)
+        check("first run adds one cache entry", after_first == before + 1, (before, after_first))
+        check("second run reuses it", after_second == after_first, (after_first, after_second))
+        check("cached run returns the same headline", first["headline"] == second["headline"])
 
         print("report file")
         out_rpt = os.path.join(HERE, "out.rpt")

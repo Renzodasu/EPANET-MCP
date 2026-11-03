@@ -38,7 +38,10 @@ _DISCONNECTED_PRESSURE = -1.0e6
 
 
 def _text(value):
-    return json.dumps(value, indent=2, ensure_ascii=False, default=str)
+    # Compact JSON: the consumer is a language model, not a human reading a
+    # terminal. Indenting every nested object roughly doubles the payload for
+    # no gain in comprehension.
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _send(payload):
@@ -84,20 +87,91 @@ def _source(args):
     raise ValueError("Provide either 'path' (an .inp file) or 'inp_text' (the .inp contents).")
 
 
-def _condense(parsed):
-    """Compact view of a parsed report: verdict, summary and the last period."""
-    return {
+#: Summary keys worth keeping. The rest are solver defaults that never change
+#: and only cost tokens; "Input Data File" is a temp path that differs on every
+#: run, which also defeats prompt caching.
+_SUMMARY_KEYS = (
+    "Number of Junctions",
+    "Number of Reservoirs",
+    "Number of Tanks",
+    "Number of Pipes",
+    "Number of Pumps",
+    "Number of Valves",
+    "Headloss Formula",
+    "Nodal Demand Model",
+    "Hydraulic Timestep",
+    "Total Duration",
+)
+
+
+def _summary(parsed):
+    """The summary lines that actually help interpret the results."""
+    raw = parsed.get("summary") or {}
+    return {key: raw[key] for key in _SUMMARY_KEYS if key in raw}
+
+
+def _headline(parsed):
+    """The few numbers that tell you whether a run is sane.
+
+    Replaces the full last-period table, which was ~4 KB on a 26-node network
+    and almost never read in full.
+    """
+    period = R.last_period(parsed)
+    nodes = period.get("nodes") or {}
+    links = period.get("links") or {}
+    out = {"time": period.get("time")}
+    pressures = {
+        key: value["pressure"]
+        for key, value in nodes.items()
+        if isinstance(value.get("pressure"), (int, float))
+    }
+    if pressures:
+        low = min(pressures, key=pressures.get)
+        high = max(pressures, key=pressures.get)
+        out["pressure"] = {
+            "min": pressures[low],
+            "min_node": low,
+            "max": pressures[high],
+            "max_node": high,
+        }
+    velocities = {
+        key: value["velocity"]
+        for key, value in links.items()
+        if isinstance(value.get("velocity"), (int, float))
+    }
+    if velocities:
+        low = min(velocities, key=velocities.get)
+        high = max(velocities, key=velocities.get)
+        out["velocity"] = {
+            "min": velocities[low],
+            "min_link": low,
+            "max": velocities[high],
+            "max_link": high,
+        }
+    return out
+
+
+def _condense(parsed, include_results=False):
+    """Compact view of a parsed report: verdict, summary and a headline.
+
+    The full last-period table is opt-in via include_results, because it is
+    the single largest part of the payload and is rarely read in full.
+    """
+    out = {
         "ok": parsed["ok"],
         "errors": parsed["errors"],
         "warnings": parsed["warnings"],
-        "summary": parsed["summary"],
+        "summary": _summary(parsed),
         "period_count": len(parsed["periods"]),
         "node_columns": parsed["node_columns"],
         "node_units": parsed["node_units"],
         "link_columns": parsed["link_columns"],
         "link_units": parsed["link_units"],
-        "last_period": R.last_period(parsed),
+        "headline": _headline(parsed),
     }
+    if include_results:
+        out["last_period"] = R.last_period(parsed)
+    return out
 
 
 def _run_source(args):
@@ -124,6 +198,39 @@ def _select_periods(parsed, period_arg):
     return chosen
 
 
+def _period_summary(periods, kind, ids, fields):
+    """Per-object min/max/mean across the selected periods."""
+    out = {}
+    for period in periods:
+        for object_id, record in period[kind].items():
+            if ids and object_id not in ids:
+                continue
+            entry = out.setdefault(object_id, {})
+            for field, value in record.items():
+                if not isinstance(value, (int, float)):
+                    continue
+                if fields and field not in fields:
+                    continue
+                stats = entry.get(field)
+                if stats is None:
+                    entry[field] = {"min": value, "max": value, "sum": value, "n": 1}
+                    continue
+                if value < stats["min"]:
+                    stats["min"] = value
+                if value > stats["max"]:
+                    stats["max"] = value
+                stats["sum"] += value
+                stats["n"] += 1
+    for entry in out.values():
+        for field, stats in list(entry.items()):
+            entry[field] = {
+                "min": round(stats["min"], 4),
+                "max": round(stats["max"], 4),
+                "mean": round(stats["sum"] / stats["n"], 4),
+            }
+    return out
+
+
 # --------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------
@@ -142,9 +249,17 @@ def tool_inspect(args):
     text, label = _source(args)
     model = I.parse_inp(text)
     issues = I.validate(model)
+    summary = I.summary(model)
+    if not args.get("include_objects"):
+        # The per-object dicts are ~9 KB on a 26-node network and only repeat
+        # what the .inp already says. Counts and options are what you need to
+        # orient yourself; ask for the objects when you actually want them.
+        summary = {
+            key: value for key, value in summary.items() if key not in ("nodes", "links")
+        }
     return {
         "source": label,
-        "summary": I.summary(model),
+        "summary": summary,
         "issues": issues,
         "error_count": len([i for i in issues if i["severity"] == "error"]),
         "warning_count": len([i for i in issues if i["severity"] == "warning"]),
@@ -195,9 +310,12 @@ def tool_run(args):
     result = {
         "source": label,
         "returncode": outcome["returncode"],
-        "console": outcome["console"],
     }
-    result.update(_condense(parsed))
+    result.update(_condense(parsed, include_results=bool(args.get("include_results"))))
+    if not parsed["ok"] and outcome["console"]:
+        # The console is progress spam on a good run and the only clue on a
+        # bad one, so keep it only when something went wrong.
+        result["console"] = outcome["console"]
     if args.get("full_report"):
         result["report_text"] = outcome["report_text"]
     return result
@@ -223,9 +341,10 @@ def tool_build_and_run(args):
         "source": save_to or "<built>",
         "structural_issues": issues,
         "returncode": outcome["returncode"],
-        "console": outcome["console"],
     }
-    result.update(_condense(parsed))
+    result.update(_condense(parsed, include_results=bool(args.get("include_results"))))
+    if not parsed["ok"] and outcome["console"]:
+        result["console"] = outcome["console"]
     if save_to:
         result["saved_to"] = save_to
     if args.get("include_inp") or structural_errors or not parsed["ok"]:
@@ -242,11 +361,31 @@ def tool_results(args):
     kind = (args.get("kind") or "nodes").lower()
     if kind not in ("nodes", "links"):
         raise ValueError("kind must be 'nodes' or 'links'.")
-    periods = _select_periods(parsed, args.get("period"))
+    period_arg = args.get("period")
+    periods = _select_periods(parsed, period_arg)
     ids = args.get("ids")
     fields = args.get("fields")
     if fields:
         fields = [str(field).lower() for field in fields]
+    # Dumping every timestep is the biggest payload this server can produce
+    # (62 KB for links on a 24-hour run). Default to a per-object summary when
+    # the caller asks for every period; opt back in with mode="full".
+    mode = str(args.get("mode") or "").lower()
+    if not mode:
+        mode = "summary" if period_arg == "all" else "full"
+    if mode not in ("full", "summary"):
+        raise ValueError("mode must be 'full' or 'summary'.")
+    units = parsed["node_units"] if kind == "nodes" else parsed["link_units"]
+    if mode == "summary":
+        return {
+            "source": label,
+            "ok": True,
+            "kind": kind,
+            "mode": "summary",
+            "units": units,
+            "period_count": len(periods),
+            "summary": _period_summary(periods, kind, ids, fields),
+        }
     output = []
     for period in periods:
         table = period[kind]
@@ -263,7 +402,8 @@ def tool_results(args):
         "source": label,
         "ok": True,
         "kind": kind,
-        "units": parsed["node_units"] if kind == "nodes" else parsed["link_units"],
+        "mode": "full",
+        "units": units,
         "periods": output,
     }
 
@@ -397,12 +537,19 @@ def tool_check(args):
 
         total = 0.0
         magnitude = 0.0
+        counted = 0
         for record in nodes.values():
             demand = record.get("demand")
             if isinstance(demand, (int, float)):
                 total += demand
                 magnitude += abs(demand)
-        tolerance = max(1e-6, 1e-4 * magnitude)
+                counted += 1
+        # EPANET prints demands to two decimals, so every node carries up to
+        # 0.005 of rounding error. Summing N of them can legitimately drift by
+        # 0.005*N, and a tolerance below that reports false failures on runs
+        # that are actually fine.
+        rounding = 0.005 * counted
+        tolerance = max(1e-6, rounding + 1e-4 * magnitude)
         checks.append(
             {
                 "check": "mass_balance",
@@ -410,6 +557,7 @@ def tool_check(args):
                 "detail": {
                     "net_demand": round(total, 6),
                     "tolerance": round(tolerance, 6),
+                    "nodes_counted": counted,
                     "note": "net demand should be about zero: supply equals consumption",
                 },
             }
@@ -457,8 +605,7 @@ def tool_check(args):
         "source": label,
         "ok": all(check["ok"] for check in checks),
         "checks": checks,
-        "summary": parsed["summary"],
-        "last_period": R.last_period(parsed) if parsed["ok"] else None,
+        "summary": _summary(parsed),
     }
 
 
@@ -484,7 +631,7 @@ def tool_save_report(args):
         "report_path": out_path,
         "inp_path": saved_inp,
         "errors": outcome["parsed"]["errors"],
-        "summary": outcome["parsed"]["summary"],
+        "summary": _summary(outcome["parsed"]),
     }
 
 
@@ -704,10 +851,16 @@ TOOLS = [
     },
     {
         "name": "inspect",
-        "description": "Parse an .inp network file and describe it: units, headloss formula, counts of junctions/reservoirs/tanks/pipes/pumps/valves, patterns, curves, plus structural problems. Does not run the solver.",
+        "description": "Parse an .inp network file and describe it: units, headloss formula, counts of junctions/reservoirs/tanks/pipes/pumps/valves, patterns, curves, plus structural problems. Does not run the solver. Returns counts and options only; set include_objects for the full per-node and per-link listing.",
         "inputSchema": {
             "type": "object",
-            "properties": dict(_SOURCE_PROPS),
+            "properties": dict(
+                _SOURCE_PROPS,
+                include_objects={
+                    "type": "boolean",
+                    "description": "Also return the full per-node and per-link dicts. Large; usually unnecessary.",
+                },
+            ),
         },
     },
     {
@@ -733,19 +886,23 @@ TOOLS = [
     },
     {
         "name": "run",
-        "description": "Run a hydraulic simulation and return the verdict, the run summary, and the node and link results for the last reporting period. This is the main tool: give it an .inp path or the .inp text.",
+        "description": "Run a hydraulic simulation and return the verdict, a compact summary, and a headline (min/max pressure and velocity with the node or link they occur at). This is the main tool: give it an .inp path or the .inp text. Set include_results for the full last-period tables.",
         "inputSchema": {
             "type": "object",
             "properties": dict(
                 _SOURCE_PROPS,
                 timeout={"type": "number", "description": "Seconds before the solver is killed. Default 120."},
+                include_results={
+                    "type": "boolean",
+                    "description": "Also return the full node and link tables for the last reporting period.",
+                },
                 full_report={"type": "boolean", "description": "Also return the entire raw .rpt text."},
             ),
         },
     },
     {
         "name": "build_and_run",
-        "description": "Build a network from a JSON spec, validate it, run it, and return the results in one call. The fastest path from an assignment description to numbers.",
+        "description": "Build a network from a JSON spec, validate it, run it, and return the results in one call. The fastest path from an assignment description to numbers. Returns a headline by default; set include_results for the full last-period tables.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -753,13 +910,17 @@ TOOLS = [
                 "save_to": {"type": "string", "description": "Optional path to write the .inp file to."},
                 "timeout": {"type": "number", "description": "Seconds before the solver is killed. Default 120."},
                 "include_inp": {"type": "boolean", "description": "Return the generated .inp text."},
+                "include_results": {
+                    "type": "boolean",
+                    "description": "Also return the full node and link tables for the last reporting period.",
+                },
             },
             "required": ["spec"],
         },
     },
     {
         "name": "results",
-        "description": "Run a network and query node or link results, filtered by ID and by column. Use period 'last' (default), 'first', 'all', or a time label such as '12:00:00'.",
+        "description": "Run a network and query node or link results, filtered by ID and by column. Use period 'last' (default), 'first', 'all', or a time label such as '12:00:00'. With period 'all' the default mode is 'summary' (per-object min/max/mean); set mode 'full' for every timestep.",
         "inputSchema": {
             "type": "object",
             "properties": dict(
@@ -772,6 +933,11 @@ TOOLS = [
                     "description": "Only these columns, e.g. [\"demand\", \"head\", \"pressure\"] for nodes or [\"flow\", \"velocity\", \"headloss\"] for links.",
                 },
                 period={"type": "string", "description": "last, first, all, or a time label."},
+                mode={
+                    "type": "string",
+                    "enum": ["full", "summary"],
+                    "description": "full returns every selected period; summary returns per-object min/max/mean. Defaults to summary when period is 'all', otherwise full.",
+                },
                 timeout={"type": "number"},
             ),
         },

@@ -8,7 +8,7 @@ No GUI. No DLL binding. No reimplementation.
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](#-quick-start)
-[![Tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-47%20passing-brightgreen)](#-testing)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
 
 </div>
@@ -44,7 +44,7 @@ a private temporary directory, so concurrent calls never collide.
 ```bash
 git clone https://github.com/Renzodasu/EPANET-MCP.git
 cd EPANET-MCP
-python tests/test_protocol.py     # 29 assertions, should all pass
+python tests/test_protocol.py     # 47 assertions, should all pass
 ```
 
 That is the entire install. No `pip install`, no virtualenv, no DLL registration.
@@ -59,8 +59,8 @@ Then point your MCP client at `server.py` — see [Using with other MCP clients]
 | `inspect` | Parse an .inp and describe it: units, formula, counts, patterns, curves |
 | `validate` | Structural checks without solving: duplicates, unknown nodes, disconnected nodes, bad tanks |
 | `build` | Build .inp text from a JSON spec, then parse and validate it |
-| `run` | Solve and return the verdict, summary, and last-period node and link results |
-| `build_and_run` | Build, validate, solve, and return results in one call |
+| `run` | Solve and return the verdict, summary, and a headline (min/max pressure and velocity) |
+| `build_and_run` | Build, validate, solve, and return the headline in one call |
 | `results` | Query node or link results, filtered by ID, column, and period |
 | `envelope` | Min and max of a field per node or link across a 24-hour run |
 | `series` | One field of one node or link at every reporting period |
@@ -78,6 +78,38 @@ Then point your MCP client at `server.py` — see [Using with other MCP clients]
 it is happily solving a disconnected node and reporting `0.00 psi` as if that were
 an answer. `check` catches that, plus negative pressure, mass imbalance, tanks
 outside their levels, and unit mismatches.
+
+## ⚡ Token efficiency
+
+Tool output lands directly in a model's context, so every byte is a token spent.
+The defaults are tuned for that:
+
+| Behaviour | Why |
+| --- | --- |
+| `run` returns a **headline** — min and max pressure and velocity, with the node or link each occurs at — not the full tables | The tables are ~4 KB on a 26-node network and are rarely read in full. Pass `include_results` when you want them. |
+| `inspect` returns counts and options, not per-node and per-link dicts | Those dicts only repeat what the .inp already says. Pass `include_objects` when you want them. |
+| `results` with `period: "all"` returns per-object **min/max/mean** | Dumping 24 timesteps of 41 links is 114 KB. Pass `mode: "full"` for every timestep. |
+| `check` returns verdicts, not a second copy of the results | It is a diagnostic, not a data source. |
+| Solver runs are **cached by .inp content** | `run` → `results` → `envelope` → `series` on the same network costs one solver invocation, not four. |
+| JSON is emitted compact, not indented | Indenting every nested object roughly doubles the payload for no gain in comprehension. |
+
+Measured on a 27-node, 41-pipe, 24-hour network — the same ten calls, before and after:
+
+| Call | Before | After |
+| --- | ---: | ---: |
+| `results` links, every period | 114,111 B | 6,406 B |
+| `results` nodes, every period | 74,852 B | 4,319 B |
+| `inspect` | 17,931 B | 1,759 B |
+| `run` | 13,458 B | 743 B |
+| `check` | 8,826 B | 1,079 B |
+| `envelope` | 3,413 B | 2,202 B |
+| `results` nodes, last period | 3,166 B | 1,596 B |
+| `series` | 1,697 B | 997 B |
+| `engine_info` | 284 B | 259 B |
+| `validate` | 105 B | 92 B |
+| **Total** | **237,843 B** | **19,452 B** |
+
+That is **12× less context** for the same information.
 
 ## 📐 The spec format
 
@@ -202,8 +234,10 @@ args = ["C:\\path\\to\\EPANET-MCP\\server.py"]
 python tests/test_protocol.py
 ```
 
-Spawns the server, speaks JSON-RPC over stdio, and checks **29 assertions** including
-the reference numbers from the worked example (J1 at 43.28 psi, J2 at 47.57 psi).
+Spawns the server, speaks JSON-RPC over stdio, and checks **47 assertions** including
+the reference numbers from the worked example (J1 at 43.28 psi, J2 at 47.57 psi),
+the headline, the results summary mode, the solver cache, and the mass-balance
+tolerance.
 
 ## 📄 License
 
