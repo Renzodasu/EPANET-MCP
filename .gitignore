@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 tests/out.*
 *.rpt
+
+# archify working files (the exported PNGs in docs/ are tracked)
+.archify/

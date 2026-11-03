@@ -7,7 +7,7 @@ No GUI. No DLL binding. No reimplementation.
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](#-requirements)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](#-quick-start)
 [![Tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)](#-testing)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
 
@@ -31,19 +31,10 @@ exactly what the EPANET 2.2 GUI would print, because it *is* EPANET 2.2.
 
 ## 🏗️ How it works
 
-```mermaid
-flowchart LR
-    A["🤖 MCP client<br/>Claude Code · Codex · DSH"] -->|"JSON-RPC<br/>over stdio"| B["🐍 epanet-mcp<br/>server.py"]
-    B -->|"1 · build"| C["📄 network.inp"]
-    C -->|"2 · run"| D["⚙️ runepanet.exe<br/>EPANET 2.2.0"]
-    D -->|"3 · solve"| E["📊 network.rpt"]
-    E -->|"4 · parse"| B
-    B -->|"structured JSON"| A
-
-    style A fill:#8A2BE2,color:#fff
-    style D fill:#0078D4,color:#fff
-    style B fill:#3776AB,color:#fff
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.png">
+  <img alt="Architecture: an MCP client sends JSON-RPC over stdio to EPANET-MCP, which writes network.inp into a scratch directory, runs runepanet.exe (EPANET 2.2.0) on it, and parses the resulting network.rpt back into structured JSON for the client." src="docs/architecture-light.png">
+</picture>
 
 The whole interface is `runepanet.exe network.inp network.rpt`. Each run happens in
 a private temporary directory, so concurrent calls never collide.
@@ -51,8 +42,8 @@ a private temporary directory, so concurrent calls never collide.
 ## 🚀 Quick start
 
 ```bash
-git clone https://github.com/Renzodasu/epanet22-mcp.git
-cd epanet22-mcp
+git clone https://github.com/Renzodasu/EPANET-MCP.git
+cd EPANET-MCP
 python tests/test_protocol.py     # 29 assertions, should all pass
 ```
 
@@ -78,21 +69,10 @@ Then point your MCP client at `server.py` — see [Using with other MCP clients]
 
 ## 🗺️ Which tool when
 
-```mermaid
-flowchart TD
-    S["You have a network"] --> Q{"In what form?"}
-    Q -->|"JSON spec"| B["build"]
-    Q -->|"existing .inp"| I["inspect · validate"]
-    B --> R["run"]
-    I --> R
-    R --> C["check"]
-    C -->|"problems found"| F["fix the spec<br/>and re-run"]
-    F --> R
-    C -->|"clean"| O["results · envelope · series"]
-
-    style C fill:#d73a49,color:#fff
-    style O fill:#2ea44f,color:#fff
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/tools-dark.png">
+  <img alt="Workflow: describe the network as a JSON spec (build) or bring an existing .inp (inspect, validate), then run, then check. Problems found go back to fixing the spec and re-running; a clean check leads to results, envelope and series." src="docs/tools-light.png">
+</picture>
 
 **`check` is the important one.** EPANET's dangerous failure mode is not crashing —
 it is happily solving a disconnected node and reporting `0.00 psi` as if that were
@@ -193,7 +173,7 @@ The server is plain JSON-RPC over stdio, so any MCP client works.
 **Claude Code**
 
 ```bash
-claude mcp add epanet -- "C:\path\to\python.exe" "C:\path\to\epanet22-mcp\server.py"
+claude mcp add epanet -- "C:\path\to\python.exe" "C:\path\to\EPANET-MCP\server.py"
 ```
 
 **Codex** (`~/.codex/config.toml`)
@@ -201,7 +181,7 @@ claude mcp add epanet -- "C:\path\to\python.exe" "C:\path\to\epanet22-mcp\server
 ```toml
 [mcp_servers.epanet]
 command = "C:\\path\\to\\python.exe"
-args = ["C:\\path\\to\\epanet22-mcp\\server.py"]
+args = ["C:\\path\\to\\EPANET-MCP\\server.py"]
 ```
 
 **DeepSeek Harness** registers it through the MCP panel, which writes an entry into
