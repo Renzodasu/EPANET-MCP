@@ -1,49 +1,66 @@
-# EPANET 2.2 MCP Server
+<div align="center">
 
-An MCP server that runs **EPA's own EPANET 2.2 hydraulic solver** and hands the
-results back as structured JSON, so an agent can build a network, solve it, and
-check the answer without touching the GUI.
+# 💧 EPANET 2.2 MCP Server
 
-The solver is not reimplemented and not re-bound: it is the official
-`runepanet.exe` from the EPANET 2.2.0 release, bundled in `bin/`. Every number this
-server returns is exactly what the EPANET 2.2 GUI would print.
+**Run EPA's own EPANET 2.2 hydraulic solver from any AI agent.**
+No GUI. No DLL binding. No reimplementation.
 
-## Why this shape
+[![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](#-requirements)
+[![Tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)](#-testing)
+[![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
 
-- **Exact 2.2.** The community engine (OWA-EPANET 2.3.x, ePyT, epanet-js) has moved
-  on. If an assignment says EPANET 2.2, this runs 2.2.
-- **No dependencies.** Pure Python standard library. No `pip install`, no DLL
-  binding, no 32/64-bit mismatch (the EPA DLL is 32-bit; this never loads it).
-- **File in, file out.** `runepanet.exe network.inp network.rpt` is the whole
-  interface. Each run happens in a private temporary directory.
+</div>
 
-## Requirements
+---
 
-- Windows
-- Python 3.9 or newer
-- Nothing else
+## 🎯 Why this exists
 
-## Layout
+EPANET ships as two things: a solver (`epanet2.dll`) and a 38-form Delphi GUI
+(`epanet2w.exe`). The GUI is fine for a human. It is useless for an agent.
 
+This server wraps **the official `runepanet.exe` from the EPANET 2.2.0 release** —
+bundled in `bin/`, unmodified — and exposes it over MCP. Every number it returns is
+exactly what the EPANET 2.2 GUI would print, because it *is* EPANET 2.2.
+
+> **Why not ePyt, epanet-js, or WNTR?**
+> They all bundle a *different* engine. ePyt ships EPANET 2.3.05; epanet-js builds
+> against OWA-EPANET 2.3.5. If an assignment, a spec, or a reviewer says **2.2**,
+> those hand you 2.3 answers. This hands you 2.2 answers.
+
+## 🏗️ How it works
+
+```mermaid
+flowchart LR
+    A["🤖 MCP client<br/>Claude Code · Codex · DSH"] -->|"JSON-RPC<br/>over stdio"| B["🐍 epanet-mcp<br/>server.py"]
+    B -->|"1 · build"| C["📄 network.inp"]
+    C -->|"2 · run"| D["⚙️ runepanet.exe<br/>EPANET 2.2.0"]
+    D -->|"3 · solve"| E["📊 network.rpt"]
+    E -->|"4 · parse"| B
+    B -->|"structured JSON"| A
+
+    style A fill:#8A2BE2,color:#fff
+    style D fill:#0078D4,color:#fff
+    style B fill:#3776AB,color:#fff
 ```
-epanet-mcp/
-  server.py              entry point (python server.py)
-  epanet_mcp/
-    __init__.py
-    units.py             US / SI unit families
-    inp.py               .inp parser, writer, validator
-    rpt.py               .rpt report parser
-    engine.py            locates and runs runepanet.exe
-    server.py            MCP JSON-RPC over stdio + tool schemas
-  bin/
-    runepanet.exe        EPANET 2.2.0 solver
-    epanet2.dll          its engine
-    EPANET2.chm          the manual
-  tests/
-    test_protocol.py     end-to-end test over stdio
+
+The whole interface is `runepanet.exe network.inp network.rpt`. Each run happens in
+a private temporary directory, so concurrent calls never collide.
+
+## 🚀 Quick start
+
+```bash
+git clone https://github.com/Renzodasu/epanet22-mcp.git
+cd epanet22-mcp
+python tests/test_protocol.py     # 29 assertions, should all pass
 ```
 
-## Tools
+That is the entire install. No `pip install`, no virtualenv, no DLL registration.
+
+Then point your MCP client at `server.py` — see [Using with other MCP clients](#-using-with-other-mcp-clients).
+
+## 🧰 The 11 tools
 
 | Tool | What it does |
 | --- | --- |
@@ -59,9 +76,32 @@ epanet-mcp/
 | `check` | Solve and report what usually goes wrong: errors, warnings, negative pressure, mass balance, tank levels, units |
 | `save_report` | Solve and write the full .rpt report to disk |
 
-## Quick start
+## 🗺️ Which tool when
 
-Describe the network as JSON and let the server build and solve it:
+```mermaid
+flowchart TD
+    S["You have a network"] --> Q{"In what form?"}
+    Q -->|"JSON spec"| B["build"]
+    Q -->|"existing .inp"| I["inspect · validate"]
+    B --> R["run"]
+    I --> R
+    R --> C["check"]
+    C -->|"problems found"| F["fix the spec<br/>and re-run"]
+    F --> R
+    C -->|"clean"| O["results · envelope · series"]
+
+    style C fill:#d73a49,color:#fff
+    style O fill:#2ea44f,color:#fff
+```
+
+**`check` is the important one.** EPANET's dangerous failure mode is not crashing —
+it is happily solving a disconnected node and reporting `0.00 psi` as if that were
+an answer. `check` catches that, plus negative pressure, mass imbalance, tanks
+outside their levels, and unit mismatches.
+
+## 📐 The spec format
+
+Describe the network as JSON and let the server build the .inp:
 
 ```json
 {
@@ -89,53 +129,54 @@ P1  flow 150.00 gpm  velocity 0.43 fps  headloss 0.12 /1000ft
 P2  flow  50.00 gpm  velocity 0.32 fps  headloss 0.12 /1000ft
 ```
 
-## The spec format
-
 Only the sections you need. Everything is optional except the objects themselves.
 
 | Key | Shape |
 | --- | --- |
 | `title` | string |
 | `options` | `units`, `headloss` (H-W, D-W, C-M), `trials`, `accuracy`, `demand_model` (DDA or PDA), `demand_multiplier`, `minimum_pressure`, `required_pressure`, `pressure_exponent`, `specific_gravity`, `viscosity`, `quality` |
-| `times` | `duration`, `hydraulic_timestep`, `pattern_timestep`, `report_timestep`, `start_clocktime`, `statistic` - all `H:MM` or `H:MM:SS` |
-| `report` | `status`, `summary`, `energy`, `nodes`, `links` - set nodes and links to `All` to get result tables |
+| `times` | `duration`, `hydraulic_timestep`, `pattern_timestep`, `report_timestep`, `start_clocktime`, `statistic` — all `H:MM` or `H:MM:SS` |
+| `report` | `status`, `summary`, `energy`, `nodes`, `links` — set nodes and links to `All` to get result tables |
 | `junctions` | `id`, `elevation`, `demand`, `pattern` |
 | `reservoirs` | `id`, `head`, `pattern` |
 | `tanks` | `id`, `elevation`, `init_level`, `min_level`, `max_level`, `diameter`, `min_volume`, `volume_curve` |
 | `pipes` | `id`, `node1`, `node2`, `length`, `diameter`, `roughness`, `minor_loss`, `status` |
 | `pumps` | `id`, `node1`, `node2`, `curve` or `power`, `speed`, `pattern` |
 | `valves` | `id`, `node1`, `node2`, `diameter`, `type` (PRV, PSV, PBV, FCV, TCV, GPV), `setting`, `minor_loss` |
-| `demands` | `id`, `demand`, `pattern`, `category` - extra demands on an existing junction |
+| `demands` | `id`, `demand`, `pattern`, `category` — extra demands on an existing junction |
 | `emitters` | `id`, `coefficient` |
-| `status` | `id`, `status` - force a link open or closed |
+| `status` | `id`, `status` — force a link open or closed |
 | `patterns` | map of pattern ID to a list of multipliers |
 | `curves` | map of curve ID to a list of `[x, y]` points |
 | `controls` | list of raw control statements |
 | `rules` | list of raw rule statements |
 | `coordinates` | map of node ID to `[x, y]` |
 
-## Units
+## ⚠️ Units — the silent killer
 
 EPANET has exactly two unit families, chosen by `options.units`:
 
 | Family | Flow units | Head | Pressure | Diameter | Length | Velocity | Headloss |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| US | CFS, GPM, MGD, IMGD, AFD | ft | psi | inches | ft | fps | /1000ft |
-| SI | LPS, LPM, MLD, CMH, CMD, CMS | m | m | mm | m | m/s | /1000m |
+| **US** | CFS, GPM, MGD, IMGD, AFD | ft | psi | inches | ft | fps | /1000ft |
+| **SI** | LPS, LPM, MLD, CMH, CMD, CMS | m | m | mm | m | m/s | /1000m |
 
 This is the single most common source of silently wrong answers. A diameter of
-`12` means 12 inches under GPM and 12 millimetres under LPS. Every tool result
-echoes the unit system back so the mismatch is visible.
+`12` means **12 inches** under GPM and **12 millimetres** under LPS. Every tool
+result echoes the unit system back so the mismatch is visible.
 
-Roughness also changes meaning with the headloss formula: Hazen-Williams uses a
-C-factor (about 100 to 140), Darcy-Weisbach uses an absolute roughness in
-millifeet (US) or millimetres (SI), and Chezy-Manning uses Manning n (about
-0.013).
+Roughness also changes meaning with the headloss formula:
 
-## Report requirements
+| Formula | Roughness means | Typical value |
+| --- | --- | --- |
+| Hazen-Williams | C-factor | 100 – 140 |
+| Darcy-Weisbach | absolute roughness | millifeet (US) / mm (SI) |
+| Chezy-Manning | Manning n | ≈ 0.013 |
 
-EPANET writes no result tables unless the input file asks for them. The server
-sets sensible defaults, but if you supply your own .inp make sure it contains:
+## 📋 Report requirements
+
+EPANET writes no result tables unless the input file asks for them. The server sets
+sensible defaults, but if you supply your own .inp make sure it contains:
 
 ```
 [REPORT]
@@ -145,38 +186,14 @@ sets sensible defaults, but if you supply your own .inp make sure it contains:
  Links   All
 ```
 
-## Troubleshooting
-
-**"runepanet.exe not found"** - set the `EPANET_HOME` environment variable to the
-folder containing it, or put it in `bin/`.
-
-**"Error 223: not enough nodes in network"** - you fed it a binary `.net` file.
-The `Examples` folder of the EPANET 2.2 install ships EPANET 2.0 binary networks.
-Use text `.inp` files.
-
-**"Error 202: illegal numeric value 24:00 in [OPTIONS] section"** - `Duration` is a
-`[TIMES]` keyword, not an `[OPTIONS]` keyword.
-
-**No result tables in the report** - the `[REPORT]` section did not ask for them.
-See above.
-
-## Testing
-
-```
-python tests/test_protocol.py
-```
-
-Spawns the server, speaks JSON-RPC over stdio, and checks 29 assertions
-including the reference numbers from the worked example.
-
-## Using with other MCP clients
+## 🔌 Using with other MCP clients
 
 The server is plain JSON-RPC over stdio, so any MCP client works.
 
 **Claude Code**
 
-```
-claude mcp add epanet -- "C:\path\to\python.exe" "C:\path\to\epanet-mcp\server.py"
+```bash
+claude mcp add epanet -- "C:\path\to\python.exe" "C:\path\to\epanet22-mcp\server.py"
 ```
 
 **Codex** (`~/.codex/config.toml`)
@@ -184,16 +201,34 @@ claude mcp add epanet -- "C:\path\to\python.exe" "C:\path\to\epanet-mcp\server.p
 ```toml
 [mcp_servers.epanet]
 command = "C:\\path\\to\\python.exe"
-args = ["C:\\path\\to\\epanet-mcp\\server.py"]
+args = ["C:\\path\\to\\epanet22-mcp\\server.py"]
 ```
 
-**DeepSeek Harness** registers it through the MCP panel, which writes an entry
-into `cordis.patch.yml`.
+**DeepSeek Harness** registers it through the MCP panel, which writes an entry into
+`cordis.patch.yml`.
 
-## License
+## 🩺 Troubleshooting
 
-MIT - see [LICENSE](LICENSE).
+| Symptom | Cause |
+| --- | --- |
+| `runepanet.exe not found` | Set `EPANET_HOME` to the folder containing it, or put it in `bin/` |
+| `Error 223: not enough nodes in network` | You fed it a binary `.net` file. The `Examples` folder of the EPANET 2.2 install ships EPANET **2.0 binary** networks — use text `.inp` files |
+| `Error 202: illegal numeric value 24:00 in [OPTIONS]` | `Duration` is a `[TIMES]` keyword, not an `[OPTIONS]` keyword |
+| No result tables in the report | The `[REPORT]` section did not ask for them — see above |
 
-The binaries in `bin/` are EPA's, redistributed unmodified under EPANET's own
-MIT license (Copyright (c) 2017 EPANET contributors), from the
+## 🧪 Testing
+
+```bash
+python tests/test_protocol.py
+```
+
+Spawns the server, speaks JSON-RPC over stdio, and checks **29 assertions** including
+the reference numbers from the worked example (J1 at 43.28 psi, J2 at 47.57 psi).
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE).
+
+The binaries in `bin/` are EPA's, redistributed unmodified under EPANET's own MIT
+license (Copyright (c) 2017 EPANET contributors), from the
 [EPANET 2.2.0 release](https://github.com/USEPA/EPANET2.2/releases/tag/v2.2.0).
