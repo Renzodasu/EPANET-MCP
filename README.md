@@ -1,5 +1,10 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/banner-dark.png">
+  <img alt="EPANET 2.2 MCP Server — EPA's water distribution solver wired into an AI agent: eleven MCP tools, 47 tests passing, no runtime dependencies." src="docs/banner-light.png">
+</picture>
+
 # 💧 EPANET 2.2 MCP Server
 
 **Run EPA's own EPANET 2.2 hydraulic solver from any AI agent.**
@@ -75,9 +80,17 @@ Then point your MCP client at `server.py` — see [Using with other MCP clients]
 </picture>
 
 **`check` is the important one.** EPANET's dangerous failure mode is not crashing —
-it is happily solving a disconnected node and reporting `0.00 psi` as if that were
-an answer. `check` catches that, plus negative pressure, mass imbalance, tanks
-outside their levels, and unit mismatches.
+it is *succeeding*. A fully unwired junction makes EPANET refuse to run at all
+(`Error 233: unconnected node`), but close a single pipe and the island behind it
+does not disappear: the run completes and the stranded node comes back with a
+pressure of `-2,410,000 psi`. Nothing else in the output flags it.
+
+`check` catches both, plus negative pressure, mass imbalance, tanks outside their
+levels, and unit mismatches.
+
+<p align="center">
+  <img width="840" alt="An MCP session: tools/list returns 11 tools, then tools/call check on a network whose junction J3 is left unwired returns ok: false — the solver reports Error 233 unconnected node J3 and the structure check reports disconnected_node." src="docs/screenshot-check.png">
+</p>
 
 ## ⚡ Token efficiency
 
@@ -238,6 +251,10 @@ Spawns the server, speaks JSON-RPC over stdio, and checks **47 assertions** incl
 the reference numbers from the worked example (J1 at 43.28 psi, J2 at 47.57 psi),
 the headline, the results summary mode, the solver cache, and the mass-balance
 tolerance.
+
+<p align="center">
+  <img width="900" alt="Terminal output of python tests/test_protocol.py: fourteen sections from protocol through report file, 47 PASS lines, ending with 47 passed, 0 failed." src="docs/screenshot-tests.png">
+</p>
 
 ## 📄 License
 

@@ -6,3 +6,5 @@ tests/out.*
 
 # archify working files (the exported PNGs in docs/ are tracked)
 .archify/
+# local image-generation harness (only the finished PNGs in docs/ are tracked)
+.shots/
